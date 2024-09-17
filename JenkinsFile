@@ -10,9 +10,15 @@ pipeline {
         DOCKER_REGISTRY = 'https://registry.hub.docker.com'
         // Credentials for deployment (Docker Hub credentials used on the remote server)
         DOCKER_HUB_DEPLOY_CREDENTIALS = credentials('docker-hub-deploy-credentials')
+	// Credential for Monitoring and Alerting
+        // New Relic API key (stored securely in Jenkins Credentials)
+        NEW_RELIC_API_KEY = credentials('new-relic-api-key')
+        // New Relic Application ID
+        NEW_RELIC_APP_ID = 'YourApplicationID' // Replace with your actual New Relic App ID
+        NEW_RELIC_LICENSE_KEY = credentials('new-relic-license-key-id')
     }
 
-    stages {
+    stages {a
         stage('Checkout') {
             steps {
                 echo 'Checking out code...'
