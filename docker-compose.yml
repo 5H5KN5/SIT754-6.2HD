@@ -1,0 +1,26 @@
+version: '3.8'  # Specify the version of the Docker Compose file format
+
+services:
+  app:
+    image: h5kn5/sit753-6.2hd:${BUILD_NUMBER}
+    ports:
+      - "80:81"
+    environment:
+      - ENVIRONMENT=development
+      # Add other environment variables as needed
+    depends_on:
+      - db
+    restart: always
+
+  db:
+    image: postgres:13
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=youruser
+      - POSTGRES_PASSWORD=yourpassword
+      - POSTGRES_DB=yourdb
+    restart: always
+
+volumes:
+  db-data:

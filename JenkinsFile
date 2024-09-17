@@ -1,0 +1,133 @@
+pipeline {
+    agent any
+
+    environment {
+        // Docker registry credentials ID in Jenkins
+        DOCKER_REGISTRY_CREDENTIALS = 'docker-hub-credentials'
+        // Docker image name
+        DOCKER_IMAGE = 'h5kn5/sit753-6.2hd'
+        // Docker registry URL
+        DOCKER_REGISTRY = 'https://registry.hub.docker.com'
+        // Credentials for deployment (Docker Hub credentials used on the remote server)
+        DOCKER_HUB_DEPLOY_CREDENTIALS = credentials('docker-hub-deploy-credentials')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out code...'
+                checkout scm
+            }
+        }
+
+        stage('Build') {
+            steps {
+                echo 'Building Docker image...'
+                script {
+                    // Build the Docker image and tag it with the build number
+                    dockerImage = docker.build("${DOCKER_IMAGE}:${env.BUILD_NUMBER}")
+                }
+            }
+        }
+
+        stage('Push Image') {
+            steps {
+                echo 'Pushing Docker image to Docker Hub...'
+                script {
+                    docker.withRegistry("${DOCKER_REGISTRY}", "${DOCKER_REGISTRY_CREDENTIALS}") {
+                        dockerImage.push("${env.BUILD_NUMBER}")
+                        dockerImage.push("latest")
+                    }
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                echo 'Running tests...'
+                // If your tests are within the Docker image
+                script {
+                    dockerImage.inside {
+                        // Replace with your test commands
+                        sh 'npm test'
+                    }
+                }
+                // If tests are run on the Jenkins agent
+                // sh 'npm test'
+            }
+            post {
+                always {
+                    echo 'Publishing test results...'
+                    // Archive test results, adjust the path as needed
+                    // junit 'path/to/test-results.xml'
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                echo 'Deploying application to test environment...'
+                sshPublisher(publishers: [
+                    sshPublisherDesc(
+                        configName: 'test-server', // SSH configuration name for test server
+                        transfers: [
+                            sshTransfer(
+                                execCommand: """
+                                    docker login -u ${DOCKER_HUB_DEPLOY_CREDENTIALS_USR} -p ${DOCKER_HUB_DEPLOY_CREDENTIALS_PSW}
+                                    docker pull ${DOCKER_IMAGE}:${env.BUILD_NUMBER}
+                                    docker stop my-app || true
+                                    docker rm my-app || true
+                                    docker run -d --name my-app -p 80:80 ${DOCKER_IMAGE}:${env.BUILD_NUMBER}
+                                """
+                            )
+                        ]
+                    )
+                ])
+            }
+        }
+
+        stage('Release') {
+            steps {
+                echo 'Preparing for release...'
+                script {
+                    def userInput = input(
+                        id: 'Proceed1', message: 'Deploy to production?', parameters: [
+                            [$class: 'BooleanParameterDefinition', defaultValue: false, description: '', name: 'Proceed']
+                        ]
+                    )
+                    if (userInput == true) {
+                        echo 'Deploying to production environment...'
+                        sshPublisher(publishers: [
+                            sshPublisherDesc(
+                                configName: 'prod-server', // SSH configuration name for production server
+                                transfers: [
+                                    sshTransfer(
+                                        execCommand: """
+                                            docker login -u ${DOCKER_HUB_DEPLOY_CREDENTIALS_USR} -p ${DOCKER_HUB_DEPLOY_CREDENTIALS_PSW}
+                                            docker pull ${DOCKER_IMAGE}:${env.BUILD_NUMBER}
+                                            docker stop my-app || true
+                                            docker rm my-app || true
+                                            docker run -d --name my-app -p 80:80 ${DOCKER_IMAGE}:${env.BUILD_NUMBER}
+                                        """
+                                    )
+                                ]
+                            )
+                        ])
+                    } else {
+                        echo 'Release aborted by user.'
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+        failure {
+            echo 'Pipeline failed.'
+            // Optional: Add notification steps (email, Slack, etc.)
+        }
+    }
+}

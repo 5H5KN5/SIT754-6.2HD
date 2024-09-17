@@ -1,0 +1,190 @@
+pipeline {
+    agent any
+
+    environment {
+        // Docker registry credentials ID in Jenkins
+        DOCKER_REGISTRY_CREDENTIALS = 'docker-hub-credentials'
+        // Docker image name (your Docker Hub username and repository)
+        DOCKER_IMAGE = 'h5kn5/financialvisionapp'
+        // Docker registry URL
+        DOCKER_REGISTRY = 'https://registry.hub.docker.com'
+        // Credentials for deployment (Docker Hub credentials used on the remote server)
+        DOCKER_HUB_DEPLOY_CREDENTIALS = credentials('docker-hub-deploy-credentials')
+        // New Relic API key (stored securely in Jenkins Credentials)
+        NEW_RELIC_API_KEY = credentials('new-relic-api-key')
+        // New Relic Application ID
+        NEW_RELIC_APP_ID = 'YourApplicationID' // Replace with your actual New Relic App ID
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out code...'
+                checkout scm
+            }
+        }
+
+        stage('Build') {
+            steps {
+                echo 'Building Docker image...'
+                script {
+                    // Build the Docker image and tag it with the build number
+                    dockerImage = docker.build("${DOCKER_IMAGE}:${env.BUILD_NUMBER}")
+                }
+            }
+        }
+
+        stage('Code Quality Analysis') {
+            steps {
+                echo 'Running SonarQube analysis...'
+                withSonarQubeEnv('SonarQubeServer') {
+                    script {
+                        def scannerHome = tool 'SonarScanner'
+                        sh "${scannerHome}/bin/sonar-scanner -Dsonar.projectKey=sit753-6.2hd -Dsonar.sources=."
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                echo 'Waiting for SonarQube Quality Gate result...'
+                timeout(time: 1, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Test') {
+            steps {
+                echo 'Running automated tests with PyTest...'
+                script {
+                    dockerImage.inside {
+                        // Install test dependencies if needed
+                        sh 'pip install pytest'
+                        // Run PyTest and generate a JUnit-style report
+                        sh 'pytest --junitxml=test-results.xml'
+                    }
+                }
+            }
+            post {
+                always {
+                    echo 'Publishing test results...'
+                    // Archive test results
+                    junit 'test-results.xml'
+                }
+            }
+        }
+
+        stage('Push Image') {
+            steps {
+                echo 'Pushing Docker image to Docker Hub...'
+                script {
+                    docker.withRegistry("${DOCKER_REGISTRY}", "${DOCKER_REGISTRY_CREDENTIALS}") {
+                        dockerImage.push("${env.BUILD_NUMBER}")
+                        dockerImage.push("latest")
+                    }
+                }
+            }
+        }
+
+          stage('Deploy') {
+            steps {
+                echo 'Deploying application to test environment using Docker Compose...'
+                script {
+                    // Use withCredentials to inject the New Relic license key
+                    withCredentials([string(credentialsId: 'new-relic-license-key', variable: 'NEW_RELIC_LICENSE_KEY')]) {
+                        sshPublisher(publishers: [
+                            sshPublisherDesc(
+                                configName: 'test-server',
+                                transfers: [
+                                    sshTransfer(
+                                        sourceFiles: 'docker-compose.yml',
+                                        removePrefix: '',
+                                        remoteDirectory: '/path/to/deployment',
+                                        execCommand: """
+                                            cd /path/to/deployment
+                                            export BUILD_NUMBER=${env.BUILD_NUMBER}
+                                            export NEW_RELIC_LICENSE_KEY=${NEW_RELIC_LICENSE_KEY}
+                                            docker login -u ${DOCKER_HUB_DEPLOY_CREDENTIALS_USR} -p ${DOCKER_HUB_DEPLOY_CREDENTIALS_PSW}
+                                            docker-compose pull
+                                            docker-compose up -d
+                                        """
+                                    )
+                                ]
+                            )
+                        ])
+                    }
+                }
+            }
+        }
+
+        stage('Release') {
+            steps {
+                echo 'Preparing for release...'
+                script {
+                    def userInput = input(
+                        id: 'Proceed1', message: 'Deploy to production?', parameters: [
+                            [$class: 'BooleanParameterDefinition', defaultValue: false, description: '', name: 'Proceed']
+                        ]
+                    )
+                    if (userInput == true) {
+                        echo 'Deploying to production environment using Docker Compose...'
+                        sshPublisher(publishers: [
+                            sshPublisherDesc(
+                                configName: 'prod-server',
+                                transfers: [
+                                    sshTransfer(
+                                        sourceFiles: 'docker-compose.yml,.env',
+                                        removePrefix: '',
+                                        remoteDirectory: '/path/to/deployment',
+                                        execCommand: """
+                                            cd /path/to/deployment
+                                            docker login -u ${DOCKER_HUB_DEPLOY_CREDENTIALS_USR} -p ${DOCKER_HUB_DEPLOY_CREDENTIALS_PSW}
+                                            docker-compose pull
+                                            docker-compose up -d
+                                        """
+                                    )
+                                ]
+                            )
+                        ])
+                    } else {
+                        echo 'Release aborted by user.'
+                    }
+                }
+            }
+        }
+
+        stage('Monitoring and Alerting') {
+            steps {
+                echo 'Configuring monitoring and alerting with New Relic...'
+                script {
+                    // Check application health status using New Relic API
+                    sh '''
+                        API_KEY="${NEW_RELIC_API_KEY_PSW}"
+                        APP_ID="${NEW_RELIC_APP_ID}"
+                        RESPONSE=$(curl -s -H "Api-Key:${API_KEY}" "https://api.newrelic.com/v2/applications/${APP_ID}.json")
+                        HEALTH_STATUS=$(echo $RESPONSE | python -c "import sys, json; print(json.load(sys.stdin)['application']['health_status'])")
+                        echo "Application health status: $HEALTH_STATUS"
+                        if [ "$HEALTH_STATUS" != "green" ]; then
+                            echo "Application is not healthy!"
+                            exit 1
+                        else
+                            echo "Application is healthy."
+                        fi
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+        failure {
+            echo 'Pipeline failed.'
+            // Optional: Add notification steps (email, Slack, etc.)
+        }
+    }
+}
