@@ -18,7 +18,7 @@ pipeline {
         NEW_RELIC_LICENSE_KEY = credentials('new-relic-license-key-id')
     }
 
-    stages {a
+    stages {
         stage('Checkout') {
             steps {
                 echo 'Checking out code...'
